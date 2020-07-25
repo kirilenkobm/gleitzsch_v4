@@ -7,12 +7,22 @@ import random
 import string
 import subprocess
 from subprocess import DEVNULL
+from array import array
 import numpy as np
 from skimage import io
 from skimage import img_as_float
 from skimage.util import img_as_ubyte
 from skimage import transform as tf
 from skimage import exposure
+from skimage import util
+from skimage import color
+try:
+    from pydub import AudioSegment
+except ImportError:
+    sys.stderr.write("Warining! Could not import pydub.\n")
+    sys.stderr.write("This library is not  mandatory, however\n")
+    sys.stderr.write("filters on sound data would be not available\n")
+    AudioSegment = None
 
 __author__ = "Bogdan Kirilenko, 2020"
 __version__ = 4.0
@@ -23,6 +33,12 @@ GLITTER = "glitter"
 GAMMA_CORRECTION = "gammma_correction"
 ADD_TEXT = "add_text"
 VERT_STREAKS = "vert_streaks"
+
+ADD_NOISE = "add_noise"
+SOUND_QUALITY = "sound_quality"
+BITRATE = "bitrate"
+INTENSIFY = "intensify"
+GLITCH_SOUND = "glitch_sound"
 
 RANDOM = "random"
 TEMP = "temp"
@@ -88,7 +104,10 @@ class Gleitzsch:
             self.__die("Lame installation not found, abort")
 
     def apply_filters(self, filters_all):
-        """Apply filters to image one-by-one."""
+        """Apply filters to image one-by-one.
+        
+        filters_all -> a dict with filter_id: parameter.
+        """
         self.v(f"Calling apply filters function")
         self.text_position = RANDOM
 
@@ -109,27 +128,33 @@ class Gleitzsch:
             elif filt_id == VERT_STREAKS:
                 self.__add_vert_streaks()
 
-    def __add_vert_streaks(self, kernel=1):
+    def __add_vert_streaks(self):
         """Add vertical streaks."""
         w, h, d = self.im_arr.shape
-        processed = []  # save shifted lines here
-        # select shift sizes
-        shifts = np.random.choice([-2, -1, 0, 1, 2], h)
-        change_points = np.random.choice([False, True], h, p=[0.97, 0.03])
-        point = True
-        current_shift = 0
-        for num, i in enumerate(range(0, h, kernel)):
-            change_ = change_points[num]
-            point = not point if change_ else point
-            col = self.im_arr[:, i: i + kernel + 1, :]
-            if not point:
-                processed.append(col)
-                current_shift = 0
+        processed = []
+        streaks_borders_num = random.choice(range(8, 16, 2))
+        streaks_borders = [0] + list(sorted(np.random.choice(range(h), streaks_borders_num, replace=False))) + [h]
+        for num, border in enumerate(streaks_borders[1:]):
+            prev_border = streaks_borders[num]
+            pic_piece = self.im_arr[:, prev_border: border, :]
+            if num % 2 != 0:  # don't touch this part
+                processed.append(pic_piece)
                 continue
-            current_shift += shifts[num]
-            col = np.roll(col, axis=0, shift=current_shift)
-            processed.append(col)
-        # merge columns back
+            piece_h, piece_w, _ = pic_piece.shape
+            piece_rearranged = []
+            shifts_raw = sorted([i if i > 0 else -i for i in map(int, np.random.normal(5, 10, piece_w))])
+            shifts_add = np.random.choice(range(-5, 2), piece_w)
+            shifts_mod = [shifts_raw[i] + shifts_add[i] for i in range(piece_w)]
+            shifts_left = [shifts_mod[i] for i in range(0, piece_w, 2)]
+            shifts_right = sorted([shifts_mod[i] for i in range(1, piece_w, 2)], reverse=True)
+            shifts = shifts_left + shifts_right
+            for col_num, col_ind in enumerate(range(piece_w)):
+                col = pic_piece[:, col_ind: col_ind + 1, :]
+                col = np.roll(col, axis=0, shift=shifts[col_num])
+                piece_rearranged.append(col)
+            piece_shifted = np.concatenate(piece_rearranged, axis=1)
+            processed.append(piece_shifted)
+        # merge shifted elements back
         self.im_arr = np.concatenate(processed, axis=1)
         self.im_arr = tf.resize(self.im_arr, (w, h))
 
@@ -187,27 +212,54 @@ class Gleitzsch:
         self.im_arr = tf.resize(self.im_arr , (_init_shape[0], _init_shape[1]))
         self.v(f"Sucessfully applied {RB_SHIFT} filter")
 
-    @staticmethod
-    def __parse_mp3_attrs(attrs):
+    def __parse_mp3_attrs(self, attrs):
         """Parse mp3-related options."""
-        return {}
+        self.v("Definint mp3-compression parameters")
+        attrs_dict = {ADD_NOISE: False,
+                      SOUND_QUALITY: 8,
+                      BITRATE: 16,
+                      INTENSIFY: False,
+                      GLITCH_SOUND: False,
+        }
+        avail_keys = set(attrs_dict.keys())
+        # re-define default params
+        for k, v in attrs.items():
+            if k not in avail_keys:
+                continue
+            self.v(f"Set param {k} to {v}")
+            attrs_dict[k] = v
+        # sanity checks
+        if attrs_dict[SOUND_QUALITY] < 1 or attrs_dict[SOUND_QUALITY] > 10:
+            self.__die(f"Sound quality must be in [1..10]")
+        return attrs_dict
+
+    def __add_noise(self):
+        """Add noise to imaage (intensifies the effect)."""
+        self.im_arr = util.random_noise(self.im_arr, mode="speckle")
 
     def mp3_compression(self, attrs):
-        """Compress and decompress the image using mp3 algorithm."""
+        """Compress and decompress the image using mp3 algorithm.
+        
+        attrs -> a dictionary with additional parameters.
+        """
         # split image in channels
+        orig_image_ = self.im_arr.copy()
         self.v("Applying mp3 compression")
         mp3_attrs = self.__parse_mp3_attrs(attrs)
+        self.__add_noise() if mp3_attrs[ADD_NOISE] else None
         # apply gamma correction upfront
         self.im_arr = exposure.adjust_gamma(image=self.im_arr, gain=self.gamma)
         w, h, _ = self.im_arr.shape
-        shift_size = h // 3
+        # after the mp3 compression the picture shifts, need to compensate that
+        # however, if bitrate >= 64 it doesn't actually happen
+        shift_size = int(h / 2.35) if mp3_attrs[BITRATE] < 64 else 0
         red = self.im_arr[:, :, 0]
         green = self.im_arr[:, :, 1]
         blue = self.im_arr[:, :, 2]
         channels = (red, green, blue)
         gliched_channels = []
         # process them separately
-        for channel in channels:
+        for num, channel in enumerate(channels, 1):
             # need 1D array now
             orig_size = w * h
             channel_flat = np.reshape(channel, newshape=(orig_size, ))
@@ -231,12 +283,15 @@ class Gleitzsch:
                 f.write(bytes_str)
             
             # define compress-decompress commands
-            mp3_compr_cmd = f'{self.lame_bin} -r --unsigned -s 16 -q 8 --resample 16 ' \
-                            f'--bitwidth 8 -b 16 -m m {raw_chan_} "{mp3_compr_}"'
+            mp3_compr_cmd = f'{self.lame_bin} -r --unsigned -s 16 -q {mp3_attrs[SOUND_QUALITY]} ' \
+                            f'--resample 16 --bitwidth 8 -b {mp3_attrs[BITRATE]} ' \
+                            f'-m m {raw_chan_} "{mp3_compr_}"'
             mp3_decompr_cmd = f'{self.lame_bin} --decode -x -t "{mp3_compr_}" {mp3_decompr_}'
 
             # call compress-decompress commands
             self.__call_proc(mp3_compr_cmd)
+            # if required: change mp3 stream itself
+            self.__glitch_sound(mp3_compr_, num, mp3_attrs) if mp3_attrs[GLITCH_SOUND] else None
             self.__call_proc(mp3_decompr_cmd)
 
             # read decompressed file | get raw sequence
@@ -258,8 +313,53 @@ class Gleitzsch:
         self.im_arr  = np.roll(a=self.im_arr, axis=1, shift=shift_size)
         perc_left, perc_right = np.percentile(self.im_arr, (5, 95))
         self.im_arr = exposure.rescale_intensity(self.im_arr, in_range=(perc_left, perc_right))
-        self.__remove_temp_files()
+        self.__remove_temp_files()  # don't need them anymore
+        self.__intensify(orig_image_) if mp3_attrs[INTENSIFY] else None
     
+    def __glitch_sound(self, mp3_path, ch_num, opts):
+        """Change mp3 file directly."""
+        self.v(f"Changing sound stream in {mp3_path} directly")
+        if AudioSegment is None:
+            self.__die("__glitch_sound requires Audiosegment (not imported)")
+        x, y, _ = self.im_arr.shape
+        # read sound file, get array of bytes (not a list!)
+        sound = AudioSegment.from_mp3(mp3_path)
+        last_ind = x * y  # sound array is a bit longer than image size
+        entire_sound_array = np.array(sound.get_array_of_samples())
+        sound_arr = entire_sound_array[:last_ind]
+        tail = entire_sound_array[last_ind: ]
+        # this path depends only on fantasy | something simple for now
+        layer = np.reshape(sound_arr, newshape=(x ,y))
+        rows_updated = []
+        for r_num, row in enumerate(layer):
+            row = np.reshape(row, newshape=(row.shape[0], 1))
+            # upd_row = np.roll(row, r_num % 20, axis=0) if ch_num == 1 else row
+            # upd_row = np.roll(row, r_num % 30, axis=0) if ch_num == 2 else row
+            # upd_row = np.roll(row, r_num % 40, axis=0) if ch_num == 3 else row
+            rows_updated.append(row)
+        # I split square in stripes -> need to merge them back
+        upd_arr_head = np.reshape(np.concatenate(rows_updated, axis=1), (x * y))
+        upd_arr = np.concatenate((upd_arr_head, tail), axis=0)
+
+        # final step: convert np array back to array
+        new_array = array("h", upd_arr_head)
+        new_sound = sound._spawn(new_array)
+        new_sound.export(mp3_path, format='mp3')
+
+
+    def __intensify(self, orig_image):
+        """Intensify mp3 glitch using differences with original image."""
+        self.v("Increasing mp3 glitch intensivity")
+        diff = self.im_arr - orig_image
+        diff[diff < 0] = 0
+        diff_hsv = color.rgb2hsv(diff)
+        diff_hsv[..., 1] *= 5
+        diff_hsv[..., 2] *= 2.5
+        diff_hsv[diff_hsv >= 1.0] = 1.0
+        diff = color.hsv2rgb(diff_hsv)
+        self.im_arr += diff
+        self.im_arr[self.im_arr > 1.0] = 1.0
+
     def __call_proc(self, command):
         """Call command using subprocess."""
         self.v(f"Calling command: {command}")
@@ -309,17 +409,29 @@ def parse_args():
     app.add_argument("--verbose", "--v1", action="store_true", dest="verbose",
                      help="Verbosity mode on.")
     # filters
-    app.add_argument("--rb_shift", "-r", default=0, type=int,
+    app.add_argument(f"--{RB_SHIFT}", "-r", default=0, type=int,
                      help="RGB abberations, the bigger value -> the higher intensivity")
-    app.add_argument("--glitter", "-g", default=0, type=int,
+    app.add_argument(f"--{GLITTER}", "-g", default=0, type=int,
                      help="Add glitter, The bigger value -> the bigger sparks")
-    app.add_argument("--vert_streaks", "-v", action="store_true", dest="vert_streaks",
+    app.add_argument(f"--{VERT_STREAKS}", "-v", action="store_true", dest=VERT_STREAKS,
                      help="Add vertical straks")
-    app.add_argument("--add_text", "-t", default=None,
+    app.add_argument(f"--{ADD_TEXT}", "-t", default=None,
                      help="Add text (position is random)")
     app.add_argument("--text_position", "--tp", type=str,
                      help="Pre-define text coordinates (left corner) "
                           "two comma-separated values like 100,50")
+    # mp3-compression params
+    app.add_argument(f"--{ADD_NOISE}", "-n", action="store_true", dest=ADD_NOISE,
+                     help="Add random noise to increare glitch effect")
+    app.add_argument(f"--{SOUND_QUALITY}", "-q", type=int, default=8,
+                     help="Gleitzsch sound quality")
+    app.add_argument(f"--{BITRATE}", "-b", type=int, default=16,
+                     help="MP3 bitrate")
+    app.add_argument(f"--{INTENSIFY}", "-i", action="store_true", dest=INTENSIFY,
+                     help="Get diff between mp3 glitched/not glitched image and "
+                          "intensify glitched channel")
+    app.add_argument(f"--{GLITCH_SOUND}", "-s", action="store_true", dest=GLITCH_SOUND,
+                     help="Modify intermediate mp3 files")
     if len(sys.argv) < 3:
         app.print_help()
         sys.exit(0)
