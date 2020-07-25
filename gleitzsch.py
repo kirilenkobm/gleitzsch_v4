@@ -25,6 +25,8 @@ ADD_TEXT = "add_text"
 RANDOM = "random"
 TEMP = "temp"
 
+MIN_IM_SIZE = 64
+
 
 class Gleitzsch:
     """Gleitzsch core class."""
@@ -62,8 +64,8 @@ class Gleitzsch:
             # keep size as is (not recommended)
             im = matrix.copy()
             w, h, _ = im.shape
-        elif size < 0:  # what if size is negative?
-            self.__die("Image size (long side) must be a positive number, got {size}")
+        elif size < MIN_IM_SIZE:  # what if size is negative?
+            self.__die("Image size (long side) must be > 64, got {size}")
         else:
             # resize the image
             scale_k = max(matrix.shape[0], matrix.shape[1]) / size
@@ -268,7 +270,7 @@ def parse_args():
     app = argparse.ArgumentParser()
     app.add_argument("input", help="Input image")
     app.add_argument("output", help="Output image")
-    app.add_argument("--size", default=1000, help="Image size (long side)")
+    app.add_argument("--size", default=1000, type=int, help="Image size (long side)")
     app.add_argument("--verbose", "-v", action="store_true", dest="verbose",
                      help="Verbosity mode on.")
     # filters
