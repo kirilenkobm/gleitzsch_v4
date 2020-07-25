@@ -16,6 +16,7 @@ from skimage import transform as tf
 from skimage import exposure
 from skimage import util
 from skimage import color
+from skimage import filters
 try:
     from pydub import AudioSegment
 except ImportError:
@@ -39,6 +40,7 @@ SOUND_QUALITY = "sound_quality"
 BITRATE = "bitrate"
 INTENSIFY = "intensify"
 GLITCH_SOUND = "glitch_sound"
+ADD_RAINBOW = "add_rainbow"
 
 RANDOM = "random"
 TEMP = "temp"
@@ -56,7 +58,8 @@ class Gleitzsch:
         self.lame_bin = "lame"
         self.__check_lame()  # check that lame is available
         self.supported_filters = [GLITTER, RB_SHIFT,
-                                  VERT_STREAKS, ADD_TEXT]
+                                  VERT_STREAKS, ADD_TEXT,
+                                  ADD_RAINBOW]
         # create temp directory
         self.tmp_dir = os.path.join(os.path.dirname(__file__), TEMP)
         os.mkdir(self.tmp_dir) if not os.path.isdir(self.tmp_dir) else None
@@ -127,6 +130,59 @@ class Gleitzsch:
                 self.__apply_glitter(value)
             elif filt_id == VERT_STREAKS:
                 self.__add_vert_streaks()
+            elif filt_id == ADD_RAINBOW:
+                self.__add_rainbow()
+
+    def __make_bw_(self, thr):
+        """Make BW image version."""
+        self.v("Producing BW version")
+        col_sum = np.sum(self.im_arr, axis=2)  # summ over col channel
+        bw_im = np.zeros((col_sum.shape[0], col_sum.shape[1]))
+        # fill zero arr with 1 where color sum is > threshold: white
+        bw_im[col_sum > thr] = 1
+        # at prev step we created 2D arr, need 3D
+        bw_im = np.reshape(bw_im, (bw_im.shape[0], bw_im.shape[1], 1))
+        # io.imsave("test.jpg", bw_im)
+        return np.concatenate((bw_im, bw_im, bw_im), axis=2)
+
+    @staticmethod
+    def __rm_bright_zones(img):
+        """Remove brigth zones."""
+        col_sum = np.sum(img, axis=2)
+        over_thr = np.reshape((col_sum - 2), (img.shape[0], img.shape[1], 1))
+        over_thr = np.concatenate((over_thr, over_thr, over_thr), axis=2)
+        new_im = np.where(over_thr > 0, img - over_thr, img)
+        new_im[new_im < 0.0] = 0.0
+        new_im[new_im > 1.0] = 1.0
+        return new_im
+
+    def __rainbow_layer_(self, bw_im):
+        """Create a rainbow layer."""
+        self.v("Making rainbow layer.")
+        rainbow_arr = self.__apply_rb_shift(80, non_self_pic=bw_im)
+        rainbow_arr = filters.gaussian(rainbow_arr,
+                                       sigma=30,
+                                       multichannel=True,
+                                       mode='reflect',
+                                       cval=0.6)
+        img_hsv = color.rgb2hsv(rainbow_arr)
+        img_hsv[..., 1] *= 3  # S
+        img_hsv[..., 2] *= 1.4  # V
+        img_hsv[img_hsv >= 1.0] = 1.0
+        rainbow_arr = color.hsv2rgb(img_hsv)
+        rainbow_arr = self.__rm_bright_zones(rainbow_arr)
+        io.imsave("test.jpg", rainbow_arr)
+        return rainbow_arr
+
+    def __add_rainbow(self):
+        """Add rainbow to the image."""
+        self.v("Adding a rainbow")
+        # detect bright parts
+        bw_version = self.__make_bw_(thr=2.1)
+        rainbow_pic = self.__rainbow_layer_(bw_version)
+        rainbow_pic /= 2
+        self.im_arr = rainbow_pic + self.im_arr
+        self.im_arr[self.im_arr > 1.0] = 1.0
 
     def __add_vert_streaks(self):
         """Add vertical streaks."""
@@ -171,13 +227,19 @@ class Gleitzsch:
         for dot in dots:
             self.im_arr[dot[0] - 1: dot[0], dot[1] - 3: dot[1] + 3, :] = 1
 
-    def __apply_rb_shift(self, value):
+    def __apply_rb_shift(self, value, non_self_pic=None):
         """Draw chromatic abberations."""
-        _init_shape = self.im_arr.shape
+        if non_self_pic is None:
+            _init_shape = self.im_arr.shape
+            proc_pic = self.im_arr
+        else:  # applything this fiilter to something else:
+            self.v("Applying RGB shift to non-self.im_arr picture!")
+            _init_shape = non_self_pic.shape
+            proc_pic = non_self_pic
         # extract different channels
-        red = self.im_arr[:, :, 0]
-        green = self.im_arr[:, :, 1]
-        blue = self.im_arr[:, :, 2]
+        red = proc_pic[:, :, 0]
+        green = proc_pic[:, :, 1]
+        blue = proc_pic[:, :, 2]
 
         # resize different channels to create the effect
         # define new sizes
@@ -207,10 +269,18 @@ class Gleitzsch:
                              (w, h, 1))
         blue_n = np.reshape(blue[:, :], (w, h, 1))
         # save changes to self.im_arr
-        self.im_arr = np.concatenate((red_n, green_n, blue_n), axis=2)
-        # reshape it back
-        self.im_arr = tf.resize(self.im_arr , (_init_shape[0], _init_shape[1]))
-        self.v(f"Sucessfully applied {RB_SHIFT} filter")
+        if non_self_pic is None:
+            self.im_arr = np.concatenate((red_n, green_n, blue_n), axis=2)
+            # reshape it back
+            self.im_arr = tf.resize(self.im_arr , (_init_shape[0], _init_shape[1]))
+            self.v(f"Sucessfully applied {RB_SHIFT} filter")
+            return None
+        else:
+            # return image (not self.im_arr)
+            upd_img = np.concatenate((red_n, green_n, blue_n), axis=2)
+            upd_img = tf.resize(upd_img, (_init_shape[0], _init_shape[1]))
+            self.v("Applied RGB shift to non-self.im_arr image")
+            return upd_img
 
     def __parse_mp3_attrs(self, attrs):
         """Parse mp3-related options."""
@@ -326,26 +396,11 @@ class Gleitzsch:
         sound = AudioSegment.from_mp3(mp3_path)
         last_ind = x * y  # sound array is a bit longer than image size
         entire_sound_array = np.array(sound.get_array_of_samples())
-        sound_arr = entire_sound_array[:last_ind]
-        tail = entire_sound_array[last_ind: ]
-        # this path depends only on fantasy | something simple for now
-        layer = np.reshape(sound_arr, newshape=(x ,y))
-        rows_updated = []
-        for r_num, row in enumerate(layer):
-            row = np.reshape(row, newshape=(row.shape[0], 1))
-            # upd_row = np.roll(row, r_num % 20, axis=0) if ch_num == 1 else row
-            # upd_row = np.roll(row, r_num % 30, axis=0) if ch_num == 2 else row
-            # upd_row = np.roll(row, r_num % 40, axis=0) if ch_num == 3 else row
-            rows_updated.append(row)
-        # I split square in stripes -> need to merge them back
-        upd_arr_head = np.reshape(np.concatenate(rows_updated, axis=1), (x * y))
-        upd_arr = np.concatenate((upd_arr_head, tail), axis=0)
-
+        # some processing here
         # final step: convert np array back to array
-        new_array = array("h", upd_arr_head)
+        new_array = array("h", entire_sound_array)
         new_sound = sound._spawn(new_array)
         new_sound.export(mp3_path, format='mp3')
-
 
     def __intensify(self, orig_image):
         """Intensify mp3 glitch using differences with original image."""
@@ -420,7 +475,11 @@ def parse_args():
     app.add_argument("--text_position", "--tp", type=str,
                      help="Pre-define text coordinates (left corner) "
                           "two comma-separated values like 100,50")
+    app.add_argument(f"--{ADD_RAINBOW}", "-a", dest=ADD_RAINBOW, action="store_true",
+                     help="Add a rainbow!")
     # mp3-compression params
+    app.add_argument(f"--compression_cycles", "--cc", default=1, type=int,
+                     help="Number of mp3 compression-decompression cycles, default 1")
     app.add_argument(f"--{ADD_NOISE}", "-n", action="store_true", dest=ADD_NOISE,
                      help="Add random noise to increare glitch effect")
     app.add_argument(f"--{SOUND_QUALITY}", "-q", type=int, default=8,
@@ -442,5 +501,8 @@ if __name__ == "__main__":
     args = parse_args()
     gleitzsch = Gleitzsch(args.input, args.size, args.verbose)
     gleitzsch.apply_filters(vars(args))  # as a dict: filter id -> value
-    gleitzsch.mp3_compression(vars(args))
+    for i in range(args.compression_cycles):
+        if args.compression_cycles > 1:
+            sys.stderr.write(f"Compression cycle num {i + 1}/{args.compression_cycles}\n")
+        gleitzsch.mp3_compression(vars(args))
     gleitzsch.save(args.output)
