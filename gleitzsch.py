@@ -22,6 +22,8 @@ RB_SHIFT = "rb_shift"
 GLITTER = "glitter"
 GAMMA_CORRECTION = "gammma_correction"
 ADD_TEXT = "add_text"
+VERT_STREAKS = "vert_streaks"
+
 RANDOM = "random"
 TEMP = "temp"
 
@@ -37,7 +39,8 @@ class Gleitzsch:
         self.im_arr, _ = self.__read_im(image_path, size)
         self.lame_bin = "lame"
         self.__check_lame()  # check that lame is available
-        self.supported_filters = [GLITTER, RB_SHIFT, GAMMA_CORRECTION, ADD_TEXT]
+        self.supported_filters = [GLITTER, RB_SHIFT,
+                                  VERT_STREAKS, ADD_TEXT]
         # create temp directory
         self.tmp_dir = os.path.join(os.path.dirname(__file__), TEMP)
         os.mkdir(self.tmp_dir) if not os.path.isdir(self.tmp_dir) else None
@@ -103,6 +106,32 @@ class Gleitzsch:
                 self.__apply_rb_shift(value)
             elif filt_id == GLITTER:
                 self.__apply_glitter(value)
+            elif filt_id == VERT_STREAKS:
+                self.__add_vert_streaks()
+
+    def __add_vert_streaks(self, kernel=1):
+        """Add vertical streaks."""
+        w, h, d = self.im_arr.shape
+        processed = []  # save shifted lines here
+        # select shift sizes
+        shifts = np.random.choice([-2, -1, 0, 1, 2], h)
+        change_points = np.random.choice([False, True], h, p=[0.97, 0.03])
+        point = True
+        current_shift = 0
+        for num, i in enumerate(range(0, h, kernel)):
+            change_ = change_points[num]
+            point = not point if change_ else point
+            col = self.im_arr[:, i: i + kernel + 1, :]
+            if not point:
+                processed.append(col)
+                current_shift = 0
+                continue
+            current_shift += shifts[num]
+            col = np.roll(col, axis=0, shift=current_shift)
+            processed.append(col)
+        # merge columns back
+        self.im_arr = np.concatenate(processed, axis=1)
+        self.im_arr = tf.resize(self.im_arr, (w, h))
 
     def __apply_glitter(self, value):
         """Apply glitter."""
@@ -158,10 +187,16 @@ class Gleitzsch:
         self.im_arr = tf.resize(self.im_arr , (_init_shape[0], _init_shape[1]))
         self.v(f"Sucessfully applied {RB_SHIFT} filter")
 
+    @staticmethod
+    def __parse_mp3_attrs(attrs):
+        """Parse mp3-related options."""
+        return {}
+
     def mp3_compression(self, attrs):
         """Compress and decompress the image using mp3 algorithm."""
         # split image in channels
         self.v("Applying mp3 compression")
+        mp3_attrs = self.__parse_mp3_attrs(attrs)
         # apply gamma correction upfront
         self.im_arr = exposure.adjust_gamma(image=self.im_arr, gain=self.gamma)
         w, h, _ = self.im_arr.shape
@@ -271,13 +306,15 @@ def parse_args():
     app.add_argument("input", help="Input image")
     app.add_argument("output", help="Output image")
     app.add_argument("--size", default=1000, type=int, help="Image size (long side)")
-    app.add_argument("--verbose", "-v", action="store_true", dest="verbose",
+    app.add_argument("--verbose", "--v1", action="store_true", dest="verbose",
                      help="Verbosity mode on.")
     # filters
     app.add_argument("--rb_shift", "-r", default=0, type=int,
                      help="RGB abberations, the bigger value -> the higher intensivity")
     app.add_argument("--glitter", "-g", default=0, type=int,
                      help="Add glitter, The bigger value -> the bigger sparks")
+    app.add_argument("--vert_streaks", "-v", action="store_true", dest="vert_streaks",
+                     help="Add vertical straks")
     app.add_argument("--add_text", "-t", default=None,
                      help="Add text (position is random)")
     app.add_argument("--text_position", "--tp", type=str,
