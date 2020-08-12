@@ -41,6 +41,7 @@ BITRATE = "bitrate"
 INTENSIFY = "intensify"
 GLITCH_SOUND = "glitch_sound"
 ADD_RAINBOW = "add_rainbow"
+SHIFT_SIZE = "shift_size"
 
 RANDOM = "random"
 TEMP = "temp"
@@ -50,11 +51,11 @@ MIN_IM_SIZE = 64
 
 class Gleitzsch:
     """Gleitzsch core class."""
-    def __init__(self, image_path, size=0, verbose=False):
+    def __init__(self, image_in, size=0, verbose=False):
         """Init gleitzsch class."""
         # get image array
         self.verbose = verbose
-        self.im_arr, _ = self.__read_im(image_path, size)
+        self.im_arr, _ = self.__read_im(image_in, size)
         self.lame_bin = "lame"
         self.__check_lame()  # check that lame is available
         self.supported_filters = [GLITTER, RB_SHIFT,
@@ -67,11 +68,29 @@ class Gleitzsch:
         self.gamma = 0.4
         self.v("Gleitzsch instance initiated successfully")
     
-    def __read_im(self, image_path, size):
+    def __load_in_arr(self, im_arr_in, size):
+        """Read image array."""
+        self.v("Loading image array.")
+        matrix = img_as_float(im_arr_in)
+        if len(matrix.shape) == 3:  # image seems to be OK
+            pass
+        elif len(matrix.shape) == 2:  # monochrome image
+            layer = np.reshape(matrix, (matrix.shape[0], matrix.shape[1], 1))
+            matrix = np.concatenate((layer, layer, layer), axis=2)
+        else:
+            self.__die("Probably the array provided is not an image")
+        
+
+    def __read_im(self, image_in, size):
         """Read image, return an array and shape."""
-        self.v(f"Reading file {image_path}")
-        self.__die(f"File {image_path} doesn't exist!") if not os.path.isfile(image_path) else None
-        matrix = img_as_float(io.imread(image_path))  # np array now
+        if os.path.isfile(image_in):
+            self.v(f"Reading file {image_in}")
+            matrix = img_as_float(io.imread(image_in))
+        elif isinstance(image_in, np.ndarray):
+            self.v("Reading np array")
+            matrix = img_as_float(image_in)
+        else:
+            self.__die(f"Cannot read:\n{image_in}")
         # image migth be either 3D or 2D; if 2D -> make it 3D
         if len(matrix.shape) == 3:
             pass  # it's a 3D array already
@@ -80,7 +99,7 @@ class Gleitzsch:
             layer = np.reshape(matrix, (matrix.shape[0], matrix.shape[1], 1))
             matrix = np.concatenate((layer, layer, layer), axis=2)
         else:  # something is wrong
-            self.__die("Image {image_path} is corrupted")
+            self.__die("Image is corrupted")
         # resize if this required
         if size == 0:
             # keep size as is (not recommended)
@@ -94,7 +113,7 @@ class Gleitzsch:
             h = int(matrix.shape[0] / scale_k)
             w = int(matrix.shape[1] / scale_k)
             im = tf.resize(image=matrix, output_shape=(h, w))
-        self.v(f"Sucessfully open {image_path}, image_shape {w}x{h}")
+        self.v(f"Sucessfully read image; shape: {w}x{h}")
         return im, (w, h)
 
     def __check_lame(self):
@@ -171,7 +190,7 @@ class Gleitzsch:
         img_hsv[img_hsv >= 1.0] = 1.0
         rainbow_arr = color.hsv2rgb(img_hsv)
         rainbow_arr = self.__rm_bright_zones(rainbow_arr)
-        io.imsave("test.jpg", rainbow_arr)
+        # io.imsave("test.jpg", rainbow_arr)
         return rainbow_arr
 
     def __add_rainbow(self):
@@ -290,11 +309,17 @@ class Gleitzsch:
                       BITRATE: 16,
                       INTENSIFY: False,
                       GLITCH_SOUND: False,
+                      SHIFT_SIZE: int(self.im_arr.shape[1] / 2.35)
         }
+        # correct shift size if bitrate is pretty high
+        if attrs_dict[BITRATE] >= 64:
+            attrs_dict[SHIFT_SIZE] = 0
         avail_keys = set(attrs_dict.keys())
         # re-define default params
         for k, v in attrs.items():
             if k not in avail_keys:
+                continue
+            if v is None:
                 continue
             self.v(f"Set param {k} to {v}")
             attrs_dict[k] = v
@@ -380,7 +405,7 @@ class Gleitzsch:
             gliched_channels.append(glitched_channel)
         self.v("Concatenation of the mp3d image + rolling + adjust contrast")
         self.im_arr = np.concatenate(gliched_channels, axis=2)
-        self.im_arr  = np.roll(a=self.im_arr, axis=1, shift=shift_size)
+        self.im_arr  = np.roll(a=self.im_arr, axis=1, shift=mp3_attrs[SHIFT_SIZE])
         perc_left, perc_right = np.percentile(self.im_arr, (5, 95))
         self.im_arr = exposure.rescale_intensity(self.im_arr, in_range=(perc_left, perc_right))
         self.__remove_temp_files()  # don't need them anymore
@@ -480,6 +505,9 @@ def parse_args():
     # mp3-compression params
     app.add_argument(f"--compression_cycles", "--cc", default=1, type=int,
                      help="Number of mp3 compression-decompression cycles, default 1")
+    app.add_argument("--save_each_cycle", "--sec", default=None,
+                     help="Save an image of each compression cycle, specify "
+                          "a directory if this is a case")
     app.add_argument(f"--{ADD_NOISE}", "-n", action="store_true", dest=ADD_NOISE,
                      help="Add random noise to increare glitch effect")
     app.add_argument(f"--{SOUND_QUALITY}", "-q", type=int, default=8,
@@ -491,6 +519,10 @@ def parse_args():
                           "intensify glitched channel")
     app.add_argument(f"--{GLITCH_SOUND}", "-s", action="store_true", dest=GLITCH_SOUND,
                      help="Modify intermediate mp3 files")
+    app.add_argument(f"--{SHIFT_SIZE}", "--sz", default=None, type=int,
+                     help="Mp3 compression produces a horizontally shifted image "
+                          "This parameter controls shift size, overriding "
+                          "automatically assigned values")
     if len(sys.argv) < 3:
         app.print_help()
         sys.exit(0)
@@ -501,8 +533,14 @@ if __name__ == "__main__":
     args = parse_args()
     gleitzsch = Gleitzsch(args.input, args.size, args.verbose)
     gleitzsch.apply_filters(vars(args))  # as a dict: filter id -> value
+    if args.compression_cycles > 1 and args.save_each_cycle:
+        os.mkdir(args.save_each_cycle) if not os.path.isdir(args.save_each_cycle) else None
     for i in range(args.compression_cycles):
         if args.compression_cycles > 1:
             sys.stderr.write(f"Compression cycle num {i + 1}/{args.compression_cycles}\n")
         gleitzsch.mp3_compression(vars(args))
+        if args.save_each_cycle:
+            filename = f"{str(i).zfill(4)}.jpg"
+            path = os.path.join(args.save_each_cycle, filename)
+            gleitzsch.save(path)
     gleitzsch.save(args.output)
