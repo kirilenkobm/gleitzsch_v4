@@ -7,6 +7,7 @@ import random
 import string
 import subprocess
 from subprocess import DEVNULL
+from subprocess import PIPE
 from array import array
 import numpy as np
 from skimage import io
@@ -83,7 +84,7 @@ class Gleitzsch:
 
     def __read_im(self, image_in, size):
         """Read image, return an array and shape."""
-        if os.path.isfile(image_in):
+        if isinstance(image_in, str) and os.path.isfile(image_in):
             self.v(f"Reading file {image_in}")
             matrix = img_as_float(io.imread(image_in))
         elif isinstance(image_in, np.ndarray):
@@ -246,6 +247,13 @@ class Gleitzsch:
         for dot in dots:
             self.im_arr[dot[0] - 1: dot[0], dot[1] - 3: dot[1] + 3, :] = 1
 
+    def shift_hue(self, value):
+        """Shift image hue in HSV."""
+        img_hsv = color.rgb2hsv(self.im_arr)
+        img_hsv[..., 0] += value
+        img_hsv[..., 0] -= 1
+        self.im_arr = color.hsv2rgb(img_hsv)
+
     def __apply_rb_shift(self, value, non_self_pic=None):
         """Draw chromatic abberations."""
         if non_self_pic is None:
@@ -388,7 +396,7 @@ class Gleitzsch:
             # if required: change mp3 stream itself
             self.__glitch_sound(mp3_compr_, num, mp3_attrs) if mp3_attrs[GLITCH_SOUND] else None
             self.__call_proc(mp3_decompr_cmd)
-
+    
             # read decompressed file | get raw sequence
             with open(mp3_decompr_, "rb") as f:
                 mp3_bytes = f.read()
