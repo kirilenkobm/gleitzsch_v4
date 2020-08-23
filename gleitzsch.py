@@ -152,12 +152,14 @@ class Gleitzsch:
         w = self.im_arr.shape[1]
         # split in 10 parts -> redefine this later
         strips_num = 10
+        max_kt = 5
         strip_w = w // strips_num
         strips = []
-        s_coeffs = [0.7, 1.2, 1.05, 1.1, 4, 1.4, 1.25, 1, 0.85, 0.8]
+        scales = [x for x in max_kt * np.random.sample(strips_num)]
+
         for j in range(strips_num):
             strip = self.im_arr[:, j * strip_w: (j + 1) * strip_w, :]
-            new_shape = (h, strip_w * s_coeffs[j])
+            new_shape = (h, int(strip_w * scales[j]))
             strip_res = tf.resize(strip, new_shape)
             strips.append(strip_res)
         concatenation = np.concatenate(strips, axis=1)
