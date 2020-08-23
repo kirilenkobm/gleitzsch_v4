@@ -7,7 +7,7 @@ import random
 import string
 import subprocess
 from subprocess import DEVNULL
-from subprocess import PIPE
+# from subprocess import PIPE
 from array import array
 import numpy as np
 from skimage import io
@@ -21,7 +21,7 @@ from skimage import filters
 try:
     from pydub import AudioSegment
 except ImportError:
-    sys.stderr.write("Warining! Could not import pydub.\n")
+    sys.stderr.write("Warning! Could not import pydub.\n")
     sys.stderr.write("This library is not  mandatory, however\n")
     sys.stderr.write("filters on sound data would be not available\n")
     AudioSegment = None
@@ -32,7 +32,7 @@ __version__ = 4.0
 # text constants
 RB_SHIFT = "rb_shift"
 GLITTER = "glitter"
-GAMMA_CORRECTION = "gammma_correction"
+GAMMA_CORRECTION = "gamma_correction"
 ADD_TEXT = "add_text"
 VERT_STREAKS = "vert_streaks"
 
@@ -43,6 +43,7 @@ INTENSIFY = "intensify"
 GLITCH_SOUND = "glitch_sound"
 ADD_RAINBOW = "add_rainbow"
 SHIFT_SIZE = "shift_size"
+STRETCHING = "stretching"
 
 RANDOM = "random"
 TEMP = "temp"
@@ -61,26 +62,14 @@ class Gleitzsch:
         self.__check_lame()  # check that lame is available
         self.supported_filters = [GLITTER, RB_SHIFT,
                                   VERT_STREAKS, ADD_TEXT,
-                                  ADD_RAINBOW]
+                                  ADD_RAINBOW, STRETCHING]
         # create temp directory
         self.tmp_dir = os.path.join(os.path.dirname(__file__), TEMP)
         os.mkdir(self.tmp_dir) if not os.path.isdir(self.tmp_dir) else None
         self.temp_files = []  # collect temp files here (to delete later)
         self.gamma = 0.4
+        self.text_position = RANDOM
         self.v("Gleitzsch instance initiated successfully")
-    
-    def __load_in_arr(self, im_arr_in, size):
-        """Read image array."""
-        self.v("Loading image array.")
-        matrix = img_as_float(im_arr_in)
-        if len(matrix.shape) == 3:  # image seems to be OK
-            pass
-        elif len(matrix.shape) == 2:  # monochrome image
-            layer = np.reshape(matrix, (matrix.shape[0], matrix.shape[1], 1))
-            matrix = np.concatenate((layer, layer, layer), axis=2)
-        else:
-            self.__die("Probably the array provided is not an image")
-        
 
     def __read_im(self, image_in, size):
         """Read image, return an array and shape."""
@@ -91,12 +80,13 @@ class Gleitzsch:
             self.v("Reading np array")
             matrix = img_as_float(image_in)
         else:
+            matrix = None
             self.__die(f"Cannot read:\n{image_in}")
-        # image migth be either 3D or 2D; if 2D -> make it 3D
+        # image might be either 3D or 2D; if 2D -> make it 3D
         if len(matrix.shape) == 3:
             pass  # it's a 3D array already
         elif len(matrix.shape) == 2:
-            # monochrom image; all procedures are 3D array-oriented
+            # monochrome image; all procedures are 3D array-oriented
             layer = np.reshape(matrix, (matrix.shape[0], matrix.shape[1], 1))
             matrix = np.concatenate((layer, layer, layer), axis=2)
         else:  # something is wrong
@@ -107,6 +97,7 @@ class Gleitzsch:
             im = matrix.copy()
             w, h, _ = im.shape
         elif size < MIN_IM_SIZE:  # what if size is negative?
+            im, w, h = None, 0, 0
             self.__die("Image size (long side) must be > 64, got {size}")
         else:
             # resize the image
@@ -114,7 +105,7 @@ class Gleitzsch:
             h = int(matrix.shape[0] / scale_k)
             w = int(matrix.shape[1] / scale_k)
             im = tf.resize(image=matrix, output_shape=(h, w))
-        self.v(f"Sucessfully read image; shape: {w}x{h}")
+        self.v(f"Successfully read image; shape: {w}x{h}")
         return im, (w, h)
 
     def __check_lame(self):
@@ -137,12 +128,12 @@ class Gleitzsch:
         if not filters_all:  # no filters: nothing to do
             return
         # keep available filters only + that have value
-        filters = {k: v for k, v in filters_all.items()
-                   if k in self.supported_filters and v}
+        filters_ = {k: v for k, v in filters_all.items()
+                    if k in self.supported_filters and v}
         # better to keep them ordered
-        filters_order = sorted(filters.keys(), key=lambda x: self.supported_filters.index(x))
+        filters_order = sorted(filters_.keys(), key=lambda x: self.supported_filters.index(x))
         for filt_id in filters_order:
-            value = filters[filt_id]
+            value = filters_[filt_id]
             self.v(f"Applying filter: {filt_id}, value={value}")
             if filt_id == RB_SHIFT:
                 self.__apply_rb_shift(value)
@@ -152,11 +143,30 @@ class Gleitzsch:
                 self.__add_vert_streaks()
             elif filt_id == ADD_RAINBOW:
                 self.__add_rainbow()
+            elif filt_id == STRETCHING:
+                self.__apply_stretching()
+
+    def __apply_stretching(self):
+        """Apply stretching filter."""
+        h = self.im_arr.shape[0]
+        w = self.im_arr.shape[1]
+        # split in 10 parts -> redefine this later
+        strips_num = 10
+        strip_w = w // strips_num
+        strips = []
+        s_coeffs = [0.7, 1.2, 1.05, 1.1, 4, 1.4, 1.25, 1, 0.85, 0.8]
+        for j in range(strips_num):
+            strip = self.im_arr[:, j * strip_w: (j + 1) * strip_w, :]
+            new_shape = (h, strip_w * s_coeffs[j])
+            strip_res = tf.resize(strip, new_shape)
+            strips.append(strip_res)
+        concatenation = np.concatenate(strips, axis=1)
+        self.im_arr = tf.resize(concatenation, (h, w))
 
     def __make_bw_(self, thr):
         """Make BW image version."""
         self.v("Producing BW version")
-        col_sum = np.sum(self.im_arr, axis=2)  # summ over col channel
+        col_sum = np.sum(self.im_arr, axis=2)  # sum over col channel
         bw_im = np.zeros((col_sum.shape[0], col_sum.shape[1]))
         # fill zero arr with 1 where color sum is > threshold: white
         bw_im[col_sum > thr] = 1
@@ -167,7 +177,7 @@ class Gleitzsch:
 
     @staticmethod
     def __rm_bright_zones(img):
-        """Remove brigth zones."""
+        """Remove bright zones."""
         col_sum = np.sum(img, axis=2)
         over_thr = np.reshape((col_sum - 2), (img.shape[0], img.shape[1], 1))
         over_thr = np.concatenate((over_thr, over_thr, over_thr), axis=2)
@@ -209,7 +219,9 @@ class Gleitzsch:
         w, h, d = self.im_arr.shape
         processed = []
         streaks_borders_num = random.choice(range(8, 16, 2))
-        streaks_borders = [0] + list(sorted(np.random.choice(range(h), streaks_borders_num, replace=False))) + [h]
+        streaks_borders = [0] + list(sorted(np.random.choice(range(h),
+                                                             streaks_borders_num,
+                                                             replace=False))) + [h]
         for num, border in enumerate(streaks_borders[1:]):
             prev_border = streaks_borders[num]
             pic_piece = self.im_arr[:, prev_border: border, :]
@@ -218,11 +230,13 @@ class Gleitzsch:
                 continue
             piece_h, piece_w, _ = pic_piece.shape
             piece_rearranged = []
-            shifts_raw = sorted([i if i > 0 else -i for i in map(int, np.random.normal(5, 10, piece_w))])
+            shifts_raw = sorted([x if x > 0 else -x for x in
+                                 map(int, np.random.normal(5, 10, piece_w))])
             shifts_add = np.random.choice(range(-5, 2), piece_w)
-            shifts_mod = [shifts_raw[i] + shifts_add[i] for i in range(piece_w)]
-            shifts_left = [shifts_mod[i] for i in range(0, piece_w, 2)]
-            shifts_right = sorted([shifts_mod[i] for i in range(1, piece_w, 2)], reverse=True)
+            shifts_mod = [shifts_raw[x] + shifts_add[x] for x in range(piece_w)]
+            shifts_left = [shifts_mod[x] for x in range(0, piece_w, 2)]
+            shifts_right = sorted([shifts_mod[x] for x in range(1, piece_w, 2)],
+                                  reverse=True)
             shifts = shifts_left + shifts_right
             for col_num, col_ind in enumerate(range(piece_w)):
                 col = pic_piece[:, col_ind: col_ind + 1, :]
@@ -240,7 +254,7 @@ class Gleitzsch:
         _dot_size = 3
         w, h, _ = self.im_arr.shape
         for _ in range(value):
-            # just randomly select sime coords
+            # just randomly select some coordinates
             dx = random.choice(range(_dot_size, w - _dot_size))
             dy = random.choice(range(_dot_size, h - _dot_size))
             dots.append((dx, dy))
@@ -255,11 +269,11 @@ class Gleitzsch:
         self.im_arr = color.hsv2rgb(img_hsv)
 
     def __apply_rb_shift(self, value, non_self_pic=None):
-        """Draw chromatic abberations."""
+        """Draw chromatic aberrations."""
         if non_self_pic is None:
             _init_shape = self.im_arr.shape
             proc_pic = self.im_arr
-        else:  # applything this fiilter to something else:
+        else:  # apply this filter to something else:
             self.v("Applying RGB shift to non-self.im_arr picture!")
             _init_shape = non_self_pic.shape
             proc_pic = non_self_pic
@@ -299,8 +313,8 @@ class Gleitzsch:
         if non_self_pic is None:
             self.im_arr = np.concatenate((red_n, green_n, blue_n), axis=2)
             # reshape it back
-            self.im_arr = tf.resize(self.im_arr , (_init_shape[0], _init_shape[1]))
-            self.v(f"Sucessfully applied {RB_SHIFT} filter")
+            self.im_arr = tf.resize(self.im_arr, (_init_shape[0], _init_shape[1]))
+            self.v(f"Successfully applied {RB_SHIFT} filter")
             return None
         else:
             # return image (not self.im_arr)
@@ -311,14 +325,14 @@ class Gleitzsch:
 
     def __parse_mp3_attrs(self, attrs):
         """Parse mp3-related options."""
-        self.v("Definint mp3-compression parameters")
+        self.v("Defining mp3-compression parameters")
         attrs_dict = {ADD_NOISE: False,
                       SOUND_QUALITY: 8,
                       BITRATE: 16,
                       INTENSIFY: False,
                       GLITCH_SOUND: False,
                       SHIFT_SIZE: int(self.im_arr.shape[1] / 2.35)
-        }
+                      }
         # correct shift size if bitrate is pretty high
         if attrs_dict[BITRATE] >= 64:
             attrs_dict[SHIFT_SIZE] = 0
@@ -337,7 +351,7 @@ class Gleitzsch:
         return attrs_dict
 
     def __add_noise(self):
-        """Add noise to imaage (intensifies the effect)."""
+        """Add noise to image (intensifies the effect)."""
         self.im_arr = util.random_noise(self.im_arr, mode="speckle")
 
     def mp3_compression(self, attrs):
@@ -355,12 +369,11 @@ class Gleitzsch:
         w, h, _ = self.im_arr.shape
         # after the mp3 compression the picture shifts, need to compensate that
         # however, if bitrate >= 64 it doesn't actually happen
-        shift_size = int(h / 2.35) if mp3_attrs[BITRATE] < 64 else 0
         red = self.im_arr[:, :, 0]
         green = self.im_arr[:, :, 1]
         blue = self.im_arr[:, :, 2]
         channels = (red, green, blue)
-        gliched_channels = []
+        glitched_channels = []
         # process them separately
         for num, channel in enumerate(channels, 1):
             # need 1D array now
@@ -410,10 +423,10 @@ class Gleitzsch:
             glitched_channel = np.array([pair[0] / 255 for pair
                                          in self.parts(decompressed, proportion)])
             glitched_channel = np.reshape(glitched_channel, newshape=(w, h, 1))
-            gliched_channels.append(glitched_channel)
+            glitched_channels.append(glitched_channel)
         self.v("Concatenation of the mp3d image + rolling + adjust contrast")
-        self.im_arr = np.concatenate(gliched_channels, axis=2)
-        self.im_arr  = np.roll(a=self.im_arr, axis=1, shift=mp3_attrs[SHIFT_SIZE])
+        self.im_arr = np.concatenate(glitched_channels, axis=2)
+        self.im_arr = np.roll(a=self.im_arr, axis=1, shift=mp3_attrs[SHIFT_SIZE])
         perc_left, perc_right = np.percentile(self.im_arr, (5, 95))
         self.im_arr = exposure.rescale_intensity(self.im_arr, in_range=(perc_left, perc_right))
         self.__remove_temp_files()  # don't need them anymore
@@ -437,7 +450,7 @@ class Gleitzsch:
 
     def __intensify(self, orig_image):
         """Intensify mp3 glitch using differences with original image."""
-        self.v("Increasing mp3 glitch intensivity")
+        self.v("Increasing mp3 glitch intensity")
         diff = self.im_arr - orig_image
         diff[diff < 0] = 0
         diff_hsv = color.rgb2hsv(diff)
@@ -461,10 +474,10 @@ class Gleitzsch:
         for tmp_file in self.temp_files:
             os.remove(tmp_file) if os.path.isfile(tmp_file) else None
 
-    def save(self, path):
+    def save(self, path_):
         """Save the resulting image."""
-        self.v(f"Saving image to: {path}")
-        io.imsave(fname=path, arr=img_as_ubyte(self.im_arr))
+        self.v(f"Saving image to: {path_}")
+        io.imsave(fname=path_, arr=img_as_ubyte(self.im_arr))
 
     def v(self, msg):
         """Show verbose message."""
@@ -485,7 +498,7 @@ class Gleitzsch:
     @staticmethod
     def parts(lst, n):
         """Split an iterable into a list of lists of len n."""
-        return [lst[i:i + n] for i in iter(range(0, len(lst), n))]
+        return [lst[x: x + n] for x in iter(range(0, len(lst), n))]
 
 
 def parse_args():
@@ -498,11 +511,11 @@ def parse_args():
                      help="Verbosity mode on.")
     # filters
     app.add_argument(f"--{RB_SHIFT}", "-r", default=0, type=int,
-                     help="RGB abberations, the bigger value -> the higher intensivity")
+                     help="RGB aberrations, the bigger value -> the higher intensity")
     app.add_argument(f"--{GLITTER}", "-g", default=0, type=int,
                      help="Add glitter, The bigger value -> the bigger sparks")
     app.add_argument(f"--{VERT_STREAKS}", "-v", action="store_true", dest=VERT_STREAKS,
-                     help="Add vertical straks")
+                     help="Add vertical streaks")
     app.add_argument(f"--{ADD_TEXT}", "-t", default=None,
                      help="Add text (position is random)")
     app.add_argument("--text_position", "--tp", type=str,
@@ -516,8 +529,10 @@ def parse_args():
     app.add_argument("--save_each_cycle", "--sec", default=None,
                      help="Save an image of each compression cycle, specify "
                           "a directory if this is a case")
+    app.add_argument(f"--{STRETCHING}", "--st", action="store_true", dest=STRETCHING,
+                     help="Apply stretching filter")
     app.add_argument(f"--{ADD_NOISE}", "-n", action="store_true", dest=ADD_NOISE,
-                     help="Add random noise to increare glitch effect")
+                     help="Add random noise to increase glitch effect")
     app.add_argument(f"--{SOUND_QUALITY}", "-q", type=int, default=8,
                      help="Gleitzsch sound quality")
     app.add_argument(f"--{BITRATE}", "-b", type=int, default=16,
@@ -534,8 +549,9 @@ def parse_args():
     if len(sys.argv) < 3:
         app.print_help()
         sys.exit(0)
-    args = app.parse_args()
-    return args
+    args_ = app.parse_args()
+    return args_
+
 
 if __name__ == "__main__":
     args = parse_args()
